@@ -1,0 +1,198 @@
+//@version=6
+// ============================================================================
+// Hammer/Star Reversal  -  counter-trend strategy for MNQ / MGC, 5-min
+// LONG : bullish hammer while trend is DOWN   | SHORT: shooting star while trend is UP
+// Entry is at the OPEN of the bar after the signal bar closes (no repainting).
+// ============================================================================
+strategy("Hammer/Star Reversal", overlay = true, pyramiding = 0, initial_capital = 50000,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     calc_on_every_tick = false, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract,
+     commission_value = input.float(0.62, "Commission per contract, per side ($)", minval = 0, step = 0.01, group = "Costs"),
+     slippage = input.int(1, "Slippage (ticks)", minval = 0, group = "Costs"))
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+G_CANDLE = "Candle definition"
+wickMult     = input.float(2.0,  "Long wick >= X * body",                    minval = 0, step = 0.1, group = G_CANDLE)
+oppRule      = input.string("Either", "Opposite wick rule", options = ["Body multiple", "Range percent", "Either"], group = G_CANDLE)
+oppBodyMult  = input.float(0.3,  "Opposite wick <= X * body",                minval = 0, step = 0.05, group = G_CANDLE)
+oppRangePct  = input.float(10.0, "Opposite wick <= % of bar range",          minval = 0, maxval = 100, step = 1, group = G_CANDLE)
+bodyZonePct  = input.float(33.3, "Body must sit in top/bottom % of range",   minval = 1, maxval = 100, step = 1, group = G_CANDLE)
+minRangeTcks = input.int(8,      "Min total bar range (ticks)",              minval = 0, group = G_CANDLE)
+
+G_TREND = "Trend filter"
+trendMode    = input.string("9 EMA", "Trend filter", options = ["9 EMA", "VWAP", "None"], group = G_TREND)
+emaLen       = input.int(9, "EMA length", minval = 1, group = G_TREND)
+slopeBars    = input.int(3, "EMA slope lookback (bars)", minval = 1, group = G_TREND)
+
+G_EXIT = "Stop / target"
+stopBufTcks  = input.int(2,      "Stop buffer (ticks)",          minval = 0, group = G_EXIT)
+rMult        = input.float(2.0,  "Target (R multiple)",          minval = 0.1, step = 0.1, group = G_EXIT)
+useEmaExit   = input.bool(false, "Exit on close back through EMA against the trade", group = G_EXIT)
+useMaxRisk   = input.bool(false, "Skip trade if stop distance > max risk", group = G_EXIT)
+maxRiskTcks  = input.int(80,     "Max risk (ticks)",             minval = 1, group = G_EXIT)
+
+G_RISK = "Session / risk"
+useSession   = input.bool(false, "Restrict entries to session window", group = G_RISK)
+sessWindow   = input.session("0930-1600", "Entry session (New York time)", group = G_RISK)
+qty          = input.int(1, "Contracts", minval = 1, group = G_RISK)
+
+G_VIS = "Visuals"
+showEma      = input.bool(true,  "Show EMA",                          group = G_VIS)
+showVwap     = input.bool(true,  "Show VWAP",                         group = G_VIS)
+showBands    = input.bool(true,  "Show VWAP +/-1 and 2 st dev bands", group = G_VIS)
+showSignals  = input.bool(true,  "Mark signal candles",               group = G_VIS)
+showFiltered = input.bool(false, "Show filtered-out patterns (gray)", group = G_VIS)
+showLevels   = input.bool(true,  "Draw stop / target while in trade", group = G_VIS)
+
+// ============================================================================
+// CANDLE ANATOMY & PATTERNS
+// ============================================================================
+tick   = syminfo.mintick
+rng    = high - low
+body   = math.abs(close - open)
+bodyHi = math.max(open, close)
+bodyLo = math.min(open, close)
+upWick = high - bodyHi
+loWick = bodyLo - low
+zone   = bodyZonePct / 100.0
+
+rangeOK = rng >= minRangeTcks * tick
+
+// Opposite-wick rule (body multiple, % of range, or either)
+upSmallBody  = upWick <= oppBodyMult * body
+upSmallRange = upWick <= oppRangePct / 100.0 * rng
+loSmallBody  = loWick <= oppBodyMult * body
+loSmallRange = loWick <= oppRangePct / 100.0 * rng
+upSmall = oppRule == "Body multiple" ? upSmallBody : oppRule == "Range percent" ? upSmallRange : (upSmallBody or upSmallRange)
+loSmall = oppRule == "Body multiple" ? loSmallBody : oppRule == "Range percent" ? loSmallRange : (loSmallBody or loSmallRange)
+
+// Hammer: long lower wick, small upper wick, body in top third
+isHammer = rangeOK and loWick >= wickMult * body and upSmall and bodyLo >= low + (1.0 - zone) * rng
+// Shooting star: long upper wick, small lower wick, body in bottom third
+isStar   = rangeOK and upWick >= wickMult * body and loSmall and bodyHi <= low + zone * rng
+
+// ============================================================================
+// INDICATORS: EMA and session-anchored VWAP with st dev bands
+// ============================================================================
+ema = ta.ema(close, emaLen)
+[vw,  vwU1, vwL1] = ta.vwap(hlc3, session.isfirstbar, 1.0)
+[vw2, vwU2, vwL2] = ta.vwap(hlc3, session.isfirstbar, 2.0)
+
+// ============================================================================
+// TREND FILTER
+// ============================================================================
+emaDown  = close < ema and ema < ema[slopeBars]
+emaUp    = close > ema and ema > ema[slopeBars]
+vwapDown = low  <= vwL1
+vwapUp   = high >= vwU1
+
+trendDown = trendMode == "9 EMA" ? emaDown : trendMode == "VWAP" ? vwapDown : true
+trendUp   = trendMode == "9 EMA" ? emaUp   : trendMode == "VWAP" ? vwapUp   : true
+
+longSetup  = isHammer and trendDown
+shortSetup = isStar   and trendUp
+
+// ============================================================================
+// SESSION / END-OF-DAY RULES  (all times New York)
+// ============================================================================
+NY = "America/New_York"
+inSession = not useSession or not na(time(timeframe.period, sessWindow, NY))
+
+// Minute-of-day at which THIS bar closes. A bar closing at/after 16:40 ET (until
+// the 18:00 reopen) blocks new entries and triggers the flatten order, which
+// fills at the next bar's open, i.e. at 16:40 on a 5-min chart.
+closeMin = hour(time_close, NY) * 60 + minute(time_close, NY)
+flatWin  = closeMin >= 16 * 60 + 40 and closeMin < 18 * 60
+
+canTrade = inSession and not flatWin and barstate.isconfirmed
+longSig  = longSetup  and canTrade
+shortSig = shortSetup and canTrade
+
+// ============================================================================
+// TRADE MANAGEMENT
+// ============================================================================
+var float stopPx    = na
+var float tgtPx     = na
+var bool  emaArmed  = false
+
+// --- Entries (market order, fills at next bar open) --------------------------
+// Risk is measured from the signal close (best estimate of next open) for the
+// max-risk filter and the initial target; the target is re-anchored to the real
+// fill price on the next bar (see below).
+if strategy.position_size == 0
+    if longSig
+        sPx  = math.round_to_mintick(low - stopBufTcks * tick)
+        risk = close - sPx
+        if risk > 0 and (not useMaxRisk or math.round(risk / tick) <= maxRiskTcks)
+            stopPx := sPx
+            tgtPx  := math.round_to_mintick(close + rMult * risk)
+            strategy.entry("Long", strategy.long, qty = qty)
+            strategy.exit("Exit Long", "Long", stop = stopPx, limit = tgtPx)
+    else if shortSig
+        sPx  = math.round_to_mintick(high + stopBufTcks * tick)
+        risk = sPx - close
+        if risk > 0 and (not useMaxRisk or math.round(risk / tick) <= maxRiskTcks)
+            stopPx := sPx
+            tgtPx  := math.round_to_mintick(close - rMult * risk)
+            strategy.entry("Short", strategy.short, qty = qty)
+            strategy.exit("Exit Short", "Short", stop = stopPx, limit = tgtPx)
+
+// --- Re-anchor target to actual fill price (R = fill-to-stop distance) --------
+if strategy.position_size > 0 and strategy.position_avg_price > stopPx
+    tgtPx := math.round_to_mintick(strategy.position_avg_price + rMult * (strategy.position_avg_price - stopPx))
+    strategy.exit("Exit Long", "Long", stop = stopPx, limit = tgtPx)
+if strategy.position_size < 0 and strategy.position_avg_price < stopPx
+    tgtPx := math.round_to_mintick(strategy.position_avg_price - rMult * (stopPx - strategy.position_avg_price))
+    strategy.exit("Exit Short", "Short", stop = stopPx, limit = tgtPx)
+
+// --- Optional EMA exit: arms once price closes on the trade's side of the EMA,
+//     then exits on a close back through it against the trade ------------------
+if strategy.position_size > 0
+    if close > ema
+        emaArmed := true
+    else if useEmaExit and emaArmed and close < ema
+        strategy.close("Long", comment = "EMA exit")
+if strategy.position_size < 0
+    if close < ema
+        emaArmed := true
+    else if useEmaExit and emaArmed and close > ema
+        strategy.close("Short", comment = "EMA exit")
+if strategy.position_size == 0
+    emaArmed := false
+
+// --- Force flat by 16:40 ET --------------------------------------------------
+if flatWin and strategy.position_size != 0
+    strategy.close_all(comment = "Flat 16:40 ET")
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+plot(showEma  ? ema : na, "EMA",  color = color.orange, linewidth = 2)
+plot(showVwap ? vw  : na, "VWAP", color = color.blue,   linewidth = 2)
+plot(showBands ? vwU1 : na, "VWAP +1 SD", color = color.new(color.blue, 50))
+plot(showBands ? vwL1 : na, "VWAP -1 SD", color = color.new(color.blue, 50))
+plot(showBands ? vwU2 : na, "VWAP +2 SD", color = color.new(color.blue, 75))
+plot(showBands ? vwL2 : na, "VWAP -2 SD", color = color.new(color.blue, 75))
+
+plotshape(showSignals and longSetup,  "Hammer (long)",       style = shape.triangleup,   location = location.belowbar, color = color.green, size = size.small)
+plotshape(showSignals and shortSetup, "Shooting star (short)", style = shape.triangledown, location = location.abovebar, color = color.red,   size = size.small)
+plotshape(showFiltered and isHammer and not trendDown, "Hammer (filtered out)",        style = shape.triangleup,   location = location.belowbar, color = color.gray, size = size.tiny)
+plotshape(showFiltered and isStar   and not trendUp,   "Shooting star (filtered out)", style = shape.triangledown, location = location.abovebar, color = color.gray, size = size.tiny)
+
+inTrade = strategy.position_size != 0
+plot(showLevels and inTrade ? stopPx : na, "Stop",   color = color.red,   linewidth = 1, style = plot.style_linebr)
+plot(showLevels and inTrade ? tgtPx  : na, "Target", color = color.green, linewidth = 1, style = plot.style_linebr)
+
+// ============================================================================
+// ALERTS
+// alertcondition() is not permitted in strategy scripts, so alert() is used.
+// Create the TradingView alert with condition = this strategy and
+// "Any alert() function call". Fires once per bar close.
+// ============================================================================
+if longSig
+    alert("Hammer/Star Reversal: LONG signal " + syminfo.ticker, alert.freq_once_per_bar_close)
+if shortSig
+    alert("Hammer/Star Reversal: SHORT signal " + syminfo.ticker, alert.freq_once_per_bar_close)
