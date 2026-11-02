@@ -8,8 +8,8 @@ strategy("Hammer/Star Reversal", overlay = true, pyramiding = 0, initial_capital
      default_qty_type = strategy.fixed, default_qty_value = 1,
      calc_on_every_tick = false, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract,
-     commission_value = input.float(0.62, "Commission per contract, per side ($)", minval = 0, step = 0.01, group = "Costs"),
-     slippage = input.int(1, "Slippage (ticks)", minval = 0, group = "Costs"))
+     commission_value = 0.62,   // $ per contract, per side (hardcoded: strategy() needs constants)
+     slippage = 1)              // ticks
 
 // ============================================================================
 // INPUTS
