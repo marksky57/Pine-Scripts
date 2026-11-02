@@ -24,6 +24,7 @@ minRangeTcks = input.int(8,      "Min total bar range (ticks)",              min
 
 G_TREND = "Trend filter"
 trendMode    = input.string("9 EMA", "Trend filter", options = ["9 EMA", "VWAP", "None"], group = G_TREND)
+vwapBand     = input.string("1 SD", "VWAP band", options = ["1 SD", "2 SD"], group = G_TREND)
 emaLen       = input.int(9, "EMA length", minval = 1, group = G_TREND)
 slopeBars    = input.int(3, "EMA slope lookback (bars)", minval = 1, group = G_TREND)
 
@@ -86,8 +87,8 @@ ema = ta.ema(close, emaLen)
 // ============================================================================
 emaDown  = close < ema and ema < ema[slopeBars]
 emaUp    = close > ema and ema > ema[slopeBars]
-vwapDown = low  <= vwL1
-vwapUp   = high >= vwU1
+vwapDown = low  <= (vwapBand == "1 SD" ? vwL1 : vwL2)
+vwapUp   = high >= (vwapBand == "1 SD" ? vwU1 : vwU2)
 
 trendDown = trendMode == "9 EMA" ? emaDown : trendMode == "VWAP" ? vwapDown : true
 trendUp   = trendMode == "9 EMA" ? emaUp   : trendMode == "VWAP" ? vwapUp   : true
